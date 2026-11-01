@@ -1,17 +1,21 @@
-"""Menyiapkan akun fiktif Source. Aman dijalankan berulang (E3-05).
+"""Menyiapkan akun fiktif Source dari daftar privat. Aman dijalankan berulang.
 
-Password dibaca dari environment (LOGLAB_SEED_PASSWORD), tidak ditulis di kode
-atau Git. Akun yang sudah ada tidak ditimpa.
+Daftar akun (default /etc/loglab/test-accounts.json, mode 0600, tidak masuk Git):
+  [{"username": "demo-user-01", "password": "..."}, ...]
+Akun yang sudah ada tidak ditimpa.
 """
-import os
+import argparse
+import json
+import stat
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional, Sequence
 
 from loglab.db import connect, initialize_source
 from loglab.security import hash_password
 
-DEFAULT_USERNAMES = ("akun-uji-1", "akun-uji-2", "akun-uji-3")
+DEFAULT_DB = Path("/var/lib/loglab/source.sqlite3")
+DEFAULT_ACCOUNTS = Path("/etc/loglab/test-accounts.json")
 MIN_PASSWORD_LENGTH = 12
 
 
@@ -43,20 +47,51 @@ def seed_accounts(db_path, accounts: Dict[str, str]) -> int:
     return added
 
 
-def main() -> int:
-    db_path = os.environ.get("LOGLAB_DB_PATH", "")
-    password = os.environ.get("LOGLAB_SEED_PASSWORD", "")
-    if not db_path:
-        print("LOGLAB_DB_PATH belum diatur", file=sys.stderr)
-        return 2
+def load_accounts_file(path) -> Dict[str, str]:
+    """Baca daftar akun privat. Pesan galat tidak memuat password."""
+    path = Path(path)
     try:
-        added = seed_accounts(
-            Path(db_path), {name: password for name in DEFAULT_USERNAMES}
-        )
+        mode = stat.S_IMODE(path.stat().st_mode)
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"tidak bisa membaca daftar akun ({type(exc).__name__})") from None
+    if mode & 0o077:
+        raise ValueError("daftar akun harus berizin 0600 (tanpa akses group/other)")
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise ValueError("daftar akun bukan JSON yang valid") from None
+    if not isinstance(data, list) or not data:
+        raise ValueError("daftar akun harus berupa array yang tidak kosong")
+    accounts: Dict[str, str] = {}
+    seen = set()
+    for item in data:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"username", "password"}
+            or not all(isinstance(value, str) for value in item.values())
+        ):
+            raise ValueError("setiap akun harus berisi tepat username dan password (teks)")
+        folded = item["username"].casefold()
+        if folded in seen:
+            raise ValueError("username ganda pada daftar akun")
+        seen.add(folded)
+        accounts[item["username"]] = item["password"]
+    return accounts
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Seed akun fiktif Source.")
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--accounts", type=Path, default=DEFAULT_ACCOUNTS)
+    args = parser.parse_args(argv)
+    try:
+        accounts = load_accounts_file(args.accounts)
+        added = seed_accounts(args.db, accounts)
     except ValueError as exc:
         print(f"Seed gagal: {exc}", file=sys.stderr)
         return 2
-    print(f"Akun baru ditambahkan: {added} dari {len(DEFAULT_USERNAMES)}")
+    print(f"Akun baru ditambahkan: {added} dari {len(accounts)}")
     return 0
 
 

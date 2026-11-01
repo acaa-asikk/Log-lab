@@ -1,0 +1,26 @@
+#!/usr/sbin/nft -f
+# LogLab Source (A): default-deny. Dipasang oleh setup.sh (@HOST_ADDR@ diganti saat setup).
+# Koneksi baru hanya dari alamat host: SSH (22) dan web (8443). A tidak menerima koneksi baru dari B.
+# Aturan memakai alamat, bukan nama interface, agar cocok dengan adapter aktual guest.
+table inet loglab_source
+delete table inet loglab_source
+
+table inet loglab_source {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        iifname "lo" accept
+        ct state invalid drop
+        ct state established,related accept
+        meta l4proto ipv6-icmp accept
+        udp sport 67 udp dport 68 accept
+        ip saddr @HOST_ADDR@ tcp dport 22 ct state new accept
+        ip saddr @HOST_ADDR@ tcp dport 8443 ct state new accept
+        ip saddr @HOST_ADDR@ icmp type echo-request accept
+    }
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}

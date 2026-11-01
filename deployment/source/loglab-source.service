@@ -1,0 +1,37 @@
+[Unit]
+Description=LogLab Source (aplikasi login dan sender)
+Documentation=file:@REPO_DIR@/docs/interface-contracts/index.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=loglab-svc
+Group=loglab-svc
+WorkingDirectory=@REPO_DIR@
+# Env dibaca systemd (root) lalu diteruskan ke proses; bukan di-source oleh shell.
+EnvironmentFile=/etc/loglab/source.env
+Environment=PYTHONPATH=@REPO_DIR@/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+RuntimeDirectory=loglab
+RuntimeDirectoryMode=0700
+# Tolak startup bila env tidak sesuai kontrak (jalan sebagai root agar bisa membaca env 0600).
+ExecStartPre=+/usr/bin/python3 @REPO_DIR@/scripts/check_contract.py --role source --env /etc/loglab/source.env
+ExecStart=@REPO_DIR@/.venv/bin/python -m uvicorn loglab.source_main:app --host ${LOGLAB_BIND_HOST} --port ${LOGLAB_PORT} --ssl-certfile ${LOGLAB_TLS_CERT} --ssl-keyfile ${LOGLAB_TLS_KEY} --workers 1
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/loglab
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

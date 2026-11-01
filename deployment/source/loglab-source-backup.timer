@@ -1,0 +1,9 @@
+[Unit]
+Description=LogLab Source - jadwal backup harian
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=LogLab Source - backup SQLite harian
+
+[Service]
+Type=oneshot
+User=loglab-svc
+Group=loglab-svc
+Environment=PYTHONPATH=@REPO_DIR@/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@REPO_DIR@/deployment/source/backup.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/loglab /var/backups/loglab

@@ -1,4 +1,7 @@
+import contextlib
+import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +11,11 @@ import httpx
 from loglab.config import Settings
 from loglab.db import connect
 from loglab.security import hash_password
-from loglab.seed_source_accounts import seed_accounts
+from loglab.seed_source_accounts import (
+    load_accounts_file,
+    main as seed_main,
+    seed_accounts,
+)
 from loglab.source_app import create_app
 from loglab.source_service import SourceService
 
@@ -167,7 +174,7 @@ class TestSourceRoutes(unittest.IsolatedAsyncioTestCase):
         self.app = create_app(self.settings)
         seed_accounts(
             self.settings.db_path,
-            {"akun-uji-1": PASSWORD, "<i>akun</i>": PASSWORD},
+            {"demo-user-01": PASSWORD, "<i>akun</i>": PASSWORD},
         )
         transport = httpx.ASGITransport(app=self.app)
         self.client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
@@ -176,32 +183,44 @@ class TestSourceRoutes(unittest.IsolatedAsyncioTestCase):
         await self.client.aclose()
         self._tmp.cleanup()
 
-    async def test_index_menampilkan_form(self):
-        r = await self.client.get("/")
+    def last_event(self):
+        return json.loads(outbox_rows(self.settings.db_path)[-1]["payload_json"])
+
+    async def test_halaman_login(self):
+        r = await self.client.get("/login")
         self.assertEqual(r.status_code, 200)
         self.assertIn("<form", r.text)
 
-    async def test_healthz_minimal(self):
-        r = await self.client.get("/healthz")
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json(), {"status": "ok"})
+    async def test_root_mengarah_ke_login(self):
+        r = await self.client.get("/")
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/login")
 
-    async def test_login_berhasil_mencatat_event(self):
-        r = await self.client.post("/login", data={"username": "akun-uji-1", "password": PASSWORD})
+    async def test_health_sesuai_kontrak(self):
+        r = await self.client.get("/health")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(
+            r.json(),
+            {
+                "service": "loglab-source",
+                "state": "ready",
+                "contract_version": self.settings.contract_version,
+            },
+        )
+
+    async def test_form_berhasil_mencatat_event(self):
+        r = await self.client.post("/login", data={"username": "demo-user-01", "password": PASSWORD})
         self.assertEqual(r.status_code, 200)
         self.assertIn("Login berhasil", r.text)
-        rows = outbox_rows(self.settings.db_path)
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(json.loads(rows[0]["payload_json"])["event_type"], "login.success")
+        self.assertEqual(self.last_event()["event_type"], "login.success")
 
-    async def test_login_salah_mencatat_failure(self):
-        r = await self.client.post("/login", data={"username": "akun-uji-1", "password": WRONG})
+    async def test_form_salah_mencatat_failure(self):
+        r = await self.client.post("/login", data={"username": "demo-user-01", "password": WRONG})
         self.assertEqual(r.status_code, 401)
-        rows = outbox_rows(self.settings.db_path)
-        self.assertEqual(json.loads(rows[0]["payload_json"])["event_type"], "login.failure")
+        self.assertEqual(self.last_event()["event_type"], "login.failure")
 
     async def test_akun_tidak_ada_pesannya_sama(self):
-        wrong = await self.client.post("/login", data={"username": "akun-uji-1", "password": WRONG})
+        wrong = await self.client.post("/login", data={"username": "demo-user-01", "password": WRONG})
         unknown = await self.client.post("/login", data={"username": "tidak-ada", "password": WRONG})
         self.assertEqual(unknown.status_code, 401)
         self.assertIn("Username atau password salah", unknown.text)
@@ -213,7 +232,7 @@ class TestSourceRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertIn("&lt;i&gt;akun&lt;/i&gt;", r.text)
         self.assertNotIn("<i>akun</i>", r.text)
 
-    async def test_input_kosong_ditolak_sebelum_auth(self):
+    async def test_form_kosong_ditolak_sebelum_auth(self):
         r = await self.client.post("/login", data={"username": "", "password": ""})
         self.assertEqual(r.status_code, 400)
         self.assertEqual(outbox_rows(self.settings.db_path), [])
@@ -222,10 +241,130 @@ class TestSourceRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c["offered"], 0)
 
     async def test_event_tanpa_nama_password_atau_ip(self):
-        await self.client.post("/login", data={"username": "akun-uji-1", "password": PASSWORD})
+        await self.client.post("/login", data={"username": "demo-user-01", "password": PASSWORD})
         payload = outbox_rows(self.settings.db_path)[0]["payload_json"]
-        for rahasia in ("akun-uji-1", PASSWORD, "127.0.0.1"):
+        for rahasia in ("demo-user-01", PASSWORD, "127.0.0.1"):
             self.assertNotIn(rahasia, payload)
+
+    async def test_api_login_json(self):
+        ok = await self.client.post(
+            "/api/v1/login", json={"username": "demo-user-01", "password": PASSWORD}
+        )
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.json(), {"result": "success"})
+        self.assertEqual(self.last_event()["event_type"], "login.success")
+        salah = await self.client.post(
+            "/api/v1/login", json={"username": "demo-user-01", "password": WRONG}
+        )
+        self.assertEqual(salah.status_code, 401)
+        self.assertEqual(salah.json(), {"result": "failure"})
+        self.assertEqual(self.last_event()["event_type"], "login.failure")
+
+    async def test_api_login_permintaan_tidak_valid(self):
+        kasus = [
+            ("bukan json", b"{rusak"),
+            ("bukan objek", b"[1, 2]"),
+            ("field hilang", json.dumps({"username": "demo-user-01"}).encode()),
+            ("tipe salah", json.dumps({"username": 7, "password": PASSWORD}).encode()),
+            ("terlalu besar", json.dumps({"username": "x", "password": "y" * 5000}).encode()),
+        ]
+        for nama, body in kasus:
+            with self.subTest(nama):
+                r = await self.client.post(
+                    "/api/v1/login", content=body, headers={"content-type": "application/json"}
+                )
+                self.assertEqual(r.status_code, 400)
+                self.assertEqual(r.json(), {"error": "invalid_request"})
+        self.assertEqual(outbox_rows(self.settings.db_path), [])
+        c = read_counters(self.settings.db_path)
+        self.assertEqual(c["request_rejected"], len(kasus))
+        self.assertEqual(c["offered"], 0)
+
+    async def test_form_dan_api_menghasilkan_event_berformat_sama(self):
+        await self.client.post("/login", data={"username": "demo-user-01", "password": PASSWORD})
+        form_event = self.last_event()
+        await self.client.post(
+            "/api/v1/login", json={"username": "demo-user-01", "password": PASSWORD}
+        )
+        api_event = self.last_event()
+        self.assertEqual(set(form_event), set(api_event))
+        self.assertEqual(form_event["account_token"], api_event["account_token"])
+        self.assertEqual(form_event["event_type"], api_event["event_type"])
+
+
+class TestSeedFile(unittest.TestCase):
+    def write(self, tmp_dir, data, mode=0o600):
+        path = Path(tmp_dir) / "test-accounts.json"
+        path.write_text(json.dumps(data) if not isinstance(data, str) else data)
+        os.chmod(path, mode)
+        return path
+
+    def test_membaca_daftar_akun(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self.write(tmp_dir, [
+                {"username": "demo-user-01", "password": PASSWORD},
+                {"username": "demo-user-02", "password": PASSWORD},
+            ])
+            self.assertEqual(
+                load_accounts_file(path),
+                {"demo-user-01": PASSWORD, "demo-user-02": PASSWORD},
+            )
+
+    def test_struktur_salah_ditolak_tanpa_membocorkan_password(self):
+        kasus = {
+            "bukan json": "{rusak",
+            "bukan array": {"username": "a"},
+            "array kosong": [],
+            "field berlebih": [{"username": "a", "password": PASSWORD, "peran": "x"}],
+            "tipe salah": [{"username": "a", "password": 123456789012}],
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            for nama, data in kasus.items():
+                with self.subTest(nama):
+                    path = self.write(tmp_dir, data)
+                    with self.assertRaises(ValueError) as ctx:
+                        load_accounts_file(path)
+                    self.assertNotIn(PASSWORD, str(ctx.exception))
+
+    def test_username_ganda_ditolak(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self.write(tmp_dir, [
+                {"username": "Demo-User-01", "password": PASSWORD},
+                {"username": "demo-user-01", "password": PASSWORD},
+            ])
+            with self.assertRaises(ValueError):
+                load_accounts_file(path)
+
+    def test_izin_file_longgar_ditolak(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self.write(
+                tmp_dir, [{"username": "demo-user-01", "password": PASSWORD}], mode=0o644
+            )
+            with self.assertRaises(ValueError):
+                load_accounts_file(path)
+
+    def test_cli_idempoten(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = self.write(tmp_dir, [
+                {"username": "demo-user-01", "password": PASSWORD},
+                {"username": "demo-user-02", "password": PASSWORD},
+            ])
+            db = Path(tmp_dir) / "source.sqlite3"
+            args = ["--db", str(db), "--accounts", str(path)]
+            for expected in ("2 dari 2", "0 dari 2"):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(seed_main(args), 0)
+                self.assertIn(expected, out.getvalue())
+            with connect(db) as conn:
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM auth_accounts").fetchone()[0], 2
+                )
+            os.chmod(path, 0o644)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(seed_main(args), 2)
+            self.assertNotIn(PASSWORD, err.getvalue())
 
 
 if __name__ == "__main__":
