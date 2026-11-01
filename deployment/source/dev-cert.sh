@@ -7,7 +7,12 @@
 set -euo pipefail
 
 IP=172.16.202.21
-WORKDIR=$HOME/loglab-dev-ca
+if [ -n "${SUDO_USER:-}" ]; then
+  USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)  # bukan folder root bila lewat sudo
+else
+  USER_HOME=$HOME
+fi
+WORKDIR=$USER_HOME/loglab-dev-ca
 INSTALL=0
 ETC_DIR=/etc/loglab
 
@@ -41,6 +46,9 @@ openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -sha256 -
   -extfile ext.cnf -out tls.crt 2>/dev/null
 rm -f tls.csr ext.cnf
 echo "sertifikat Source dibuat untuk IP $IP: $WORKDIR/tls.crt"
+if [ -n "${SUDO_USER:-}" ]; then
+  chown -R "$SUDO_USER" "$WORKDIR"  # agar ca.crt bisa disalin dengan scp oleh pemilik akun
+fi
 
 if [ "$INSTALL" -eq 1 ]; then
   [ "$(id -u)" -eq 0 ] || { echo "--install butuh sudo" >&2; exit 1; }
