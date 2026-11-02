@@ -256,6 +256,14 @@ start_services() {
   warn "service belum menjawab /health; lihat: journalctl -u loglab-source -n 50 --no-pager"
 }
 
+# Alamat klien SSH yang sedang tersambung (satu per baris).
+ssh_peers() {
+  ss -Htn state established '( sport = :22 )' 2>/dev/null \
+    | awk '{print $4}' \
+    | sed -e 's/:[0-9]*$//' -e 's/^\[//' -e 's/\]$//' -e 's/^::ffff://' \
+    | sort -u
+}
+
 install_firewall() {
   skipped firewall && { log "lewati: firewall"; return; }
   command -v nft >/dev/null || die "nft tidak ada; pasang paket 'nftables'"
@@ -273,9 +281,15 @@ install_firewall() {
     log "firewall terpasang dan valid, BELUM diterapkan (tambahkan --apply-firewall)"
     return
   fi
-  local ssh_client=${SSH_CONNECTION%% *}
-  if [ -n "$ssh_client" ] && [ "$ssh_client" != "$HOST_ADDR" ] && [ "$FORCE_FIREWALL" -ne 1 ]; then
-    die "sesi SSH ini dari $ssh_client, bukan $HOST_ADDR: firewall akan memutus koneksi. Ulangi dengan --host-addr $ssh_client atau --force-firewall (pemulihan: console VM, 'sudo nft delete table inet loglab_source')"
+  # Baca koneksi SSH yang benar-benar aktif (sudo membuang variabel lingkungan SSH, jadi env tidak bisa diandalkan).
+  local peer others=()
+  while IFS= read -r peer; do
+    if [ -n "$peer" ] && [ "$peer" != "$HOST_ADDR" ]; then
+      others+=("$peer")
+    fi
+  done < <(ssh_peers)
+  if [ ${#others[@]} -gt 0 ] && [ "$FORCE_FIREWALL" -ne 1 ]; then
+    die "ada sesi SSH aktif dari ${others[*]}, bukan $HOST_ADDR: firewall akan memutusnya. Ulangi dengan --host-addr yang benar atau --force-firewall (pemulihan: console VM, 'sudo nft delete table inet loglab_source')"
   fi
   nft -f "$NFT_DIR/loglab-source.nft"
   log "firewall diterapkan (SSH/web hanya dari $HOST_ADDR)"

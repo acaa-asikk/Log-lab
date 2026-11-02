@@ -47,6 +47,12 @@ class TestDeploymentSource(unittest.TestCase):
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_penjaga_firewall_membaca_sesi_ssh_aktif(self):
+        setup = read("setup.sh")
+        self.assertNotIn("SSH_CONNECTION", setup)  # sudo membuang variabel ini
+        self.assertIn("sport = :22", setup)
+        self.assertIn("--force-firewall", setup)
+
     def test_setup_tidak_mencetak_secret(self):
         setup = read("setup.sh")
         for baris in setup.splitlines():
